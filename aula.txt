@@ -1,0 +1,213 @@
+minimal API não tem controller!
+
+dotnet new webapi -minimal -n MinimalAPI
+
+packages pra trabalhar com SQLServer:
+dotnet add package Microsoft.EntityFrameworkCore
+dotnet add package Microsoft.EntityFrameworkCore.Design
+dotnet add package Microsoft.EntityFrameworkCore.SqlServer
+dotnet add package Microsoft.EntityFrameworkCore.Design
+
+o cara vai usar o DI do AutoMapper:
+dotnet add package AutoMapper.Extensions.Microsoft.DependencyInjection
+
+<~~~~~~~~~~~~~~~~~~~~SESSÃO PRA PENSAR NAS MODELS~~~~~~~~~~~~~~~~~~~~>
+
+primeiro pensa-se na model, nesse aqui criei o Command.cs, depois criei as Dtos de criação, edição e de leitura dessa model, e então fui fazer a sessão pra conectar com o banco
+
+<~~~~~~~~~~~~~~~~~~~~SESSÃO PRA PENSAR NAS MODELS~~~~~~~~~~~~~~~~~~~~>
+<~~~~~~~~~~~~~~~~~~~~SESSÃO PRA CONECTAR COM UM BANCO E USAR UM SQLSERVER~~~~~~~~~~~~~~~~~~~~>
+
+o cara usa secret pra guardar a senha e o usuário do servidor:
+dotnet user-secrets init
+
+docker:
+docker ps lista os containers rodando
+no docker-compose.yaml tem que ter:
+
+version: "3.8"
+services:
+  sqlserver:
+    image: "mcr.microsoft.com/mssql/server:2019-latest"
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "paSSw0rd"
+      MSSQL_PID: "Express"
+    ports:
+      - "1433:1433"
+
+docker-compose up -d pra rodar o docker e -d pra não lockar o terminal
+docker-compose stop pra parar o docker
+
+mais pra frente ele seta user-secrets pra 2 chaves, UserId e Password:
+dotnet user-secrets "UserId" "sa"
+dotnet user-secrets "Password" "SENHA-DO-SQL-SERVER-LA-DO-DOCKER-COMPOSE.YAML, no caso aqui paSSw0rd"
+
+ajusta o appSettings.Development pra ter uma propriedade do tipo ConnectionString pra ser pega no Program.cs na hora de buildar a connectionString do SQL no Program(Startup no .NET 5.0-)
+"ConnectionStrings": 
+  {
+    "SQLDbConnection" : "Server=localhost,1433;Initial Catalog=CommandDb"
+  }
+a porta aqui é a mesma que tá no docker, e o Initial Catalog nada mais é que o database a ser usado
+
+procedimentos pra criar o dbContext:
+cria uma pasta só pra ele, cria AppDbContext.cs, ele tem que herdar de DbContext
+colocar um construtor vazio passando de parâmetro um DbContextOptions<AppDbContext> options), herdando de base(options)
+
+pra finalizar, essa é a parte de qual vai ser o nome da tabela e diretamente pra qual model ela vai seguir e se criada.
+public DbSet<Command> Commands => Set<Command>()
+
+seta no program.cs/startup a connectionString usando o SqlConnectionStringBuilder, onde vc seta a ConnectionString desse SqlConnectionStringBuilder pra ser a configuração setada lá atrás no appsettings, usando o próprio builder.Configuration.GetConnectionString("NOMEDACONNECTION")
+seta o UserId dele pra ser o builder.Configuration também, só que buscando na array builder.Configuration["UserId"]
+seta o Password dele pra ser o builder.Configuration também, só que buscando na array builder.Configuration["Password"]
+
+e finalmente pra setar o DbContext usando a connectionString criada, chama o builder.Services.AddDbContext e faz a mágica a seguir:
+builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlServer(sqlConBuilder.ConnectionString));
+
+<~~~~~~~~~~~~~~~~~~~~SESSÃO PRA CONECTAR COM UM BANCO E USAR UM SQLSERVER~~~~~~~~~~~~~~~~~~~~>
+<~~~~~~~~~~~~~~~~~~~~SESSÃO PRA CRIAR UM BANCO E USAR UM SQLSERVER~~~~~~~~~~~~~~~~~~~~>
+
+depois das primeiras models criadas e um dbContext setado com connectionString, cria-se a famosa migration inicial:
+dotnet ef migrations add initialmigration
+
+se der erro, instala: dotnet tool install --global dotnet-ef
+outro erro que deu aqui foi porque ficou faltando setar o context usando a magia na linha 65
+
+só criou a migration, o banco ainda não, pra testar a configuração e tudo certo agora de verdade, ele vai tentar se conectar com essa conexão que foi passada no connectionString, que por si só está sendo rodada em um container no docker, e empurrar essa migration no banco. Roda-se:
+dotnet ef database update
+
+se der erro de login de SA, é porque o docker provavelmente foi iniciado com uma instância de SQLSERVER já rodando(o que não faz muito sentido porque se você tá usando docker é porque você quer criar uma instância de rápido uso...enfim, docker né, por isso quase nunca uso), então abre o services.msc e para o serviço "SQL Server", e fecha o SSMS -> Roda o docker denovo, taca 127.0.0.1, SQL Server Authentication, usuário sa e senha A-SENHA-DO-DOCKER-COMPOSE.YAML, roda o database update denovo e GG.
+
+dando pausa pra ler direito sobre user-secrets...flw
+https://www.youtube.com/watch?v=5YB49OEmbbE 1:06:20
+<~~~~~~~~~~~~~~~~~~~~SESSÃO PRA CRIAR UM BANCO E USAR UM SQLSERVER~~~~~~~~~~~~~~~~~~~~>
+
+detalhe do entity é a mesma coisa que o NHibernate também: tem que dar o famoso SaveChanges() pra efetivamente finalizar a transação
+entity não precisa de UPDATE
+
+aqui esse cara usa Tasks assíncronas como definição das interfaces...Oliveira falou que o padrão talvez seja esse mesmo, ouvés do ActionResult usado lá no outro projeto enfim, ficar de olho
+antes de fazer a implementação da interface do repositório, inserir o contexto via DI no construtor obviamente:
+public class CommandRepo : ICommandRepo
+{
+	private AppDbContext _context;
+	
+    public CommandRepo(AppDbContext context)
+    {
+        _context = context;
+    }
+}
+
+como tá trabalhando com task assíncrona, tem que dar return await nas funções que não são void. a verbosidade do context do entity vem sempre do que se quer fazer: se for uma ação/verbo do contexto como um todo, acessa-se direto dele, senão normalmente você chama a tabela indicada lá no AppDbContext e faz oq você quer.
+
+ex. de uma ação de uma tabela:
+só pra adicionar na leitura dessas Tasks, a função abaixo retorna um Command nullable, poderia ser por ex Task<ActionResult<CommandReadDto>>, que retorna uma actionResult de um único CommandReadDto
+public async Task<Command?> GetCommandById(int id)
+{
+	return await _context.Commands.FirstOrDefaultASYNC(c => c.Id == id);
+}
+
+ex. de uma ação do contexto geral:
+public async Task CreateCommand(Command cmd)
+{
+	if (cmd == null)
+	{
+		throw new ArgumentNullException(nameof(cmd));
+	}
+	
+	_context.AddASYNC(cmd);
+}
+
+LEMBRA QUE TUDO TEM QUE SER ASYNC SE VC TA MEXENDO COM TASK ASSINCRONA, sendo assim, verbos que só do basicão já consegui analisar que são diferentes:
+_context.AddAsync();
+_context.Commands.ToListAsync();
+_context.SaveChanges();
+
+<~~~~~~~~~~~~~~~~~~~~SESSÃO DI PARA REPOSITORIOS~~~~~~~~~~~~~~~~~~~~>
+usar repositórios permite que se em algum dia a tecnologia do projeto for trocada, as regras de negócio podem ser reutilizadas, então é só trocar ali, mas independente disso TEM QUE SER FEITA A DI DOS REPOSITÓRIOS pra que seja acessado por toda a aplicação:
+
+no program, só tacar lá(ESSE SIM É PRA SER PARECIDO COM O AddSingleton, PASSA A INTERFACE E DEPOIS A IMPLEMENTAÇÃO NA TIPAGEM)
+builder.Services.AddScoped<ICommandRepo, CommandRepo>(); 
+<~~~~~~~~~~~~~~~~~~~~SESSÃO DI PARA REPOSITORIOS~~~~~~~~~~~~~~~~~~~~>
+<~~~~~~~~~~~~~~~~~~~~SESSÃO AUTOMAPPER~~~~~~~~~~~~~~~~~~~~>
+como ele tá usando Dtos pras requisições não terem acesso a dados importantes, seria bom uma forma de poder mapear de DTO para model, e de model para DTO facilmente, e é pra isso que o AutoMapper existe
+Cria-se a pasta Profiles que vai ter todos os modelProfile que o AutoMapper vai ler
+
+public class CommandsProfile : Profile
+    {
+        public CommandsProfile()
+        {
+            // Source -> Target
+			//sempre vai ser assim, trocando a lógica de acordo com o que o Dto vai fazer
+            CreateMap<Command, CommandReadDto>(); //o dto vai ser o que vai ser retornado em requests de leitura, então sem Id, onde a gente passa um Command pra um CommandReadDto()
+            CreateMap<CommandCreateDto, Command>();//tanto pra esse quanto o outro, a criação vai vir da request, que será passado pra gente usando o AutoMapper, como uma model Command a ser persistida no banco
+            CreateMap<CommandUpdateDto, Command>();//por isso o 1 pra 1
+            
+        }
+    }
+}
+
+tem que adicionar no Program também que vai usar AutoMapper, usando essa mágica aqui, ele diz pra usar depois da DI do repositório, que por si só vem depois da adição do context. Pra mim mágica tem que tar com mágica, enfim:
+builder.Services.AddAutoMapper(AppDomain.CurrentDomain.GetAssemblies());
+
+<~~~~~~~~~~~~~~~~~~~~SESSÃO MINIMAL API FINALMENTE~~~~~~~~~~~~~~~~~~~~>
+uma api mvc comum usa controllers, que por si só possuem os decorators 
+[ApiController]: bastante coisa out of the box já, como validação, binding
+[Route("")]: rota da API, normal tbm
+construtor e ações decoradas com [HttpGet],[HttpPost] etc
+
+uma Minimal API não tem controller, então tudo tem que ser feito na Program.cs, depois que a builder.Build() for executado, obviamente
+Como não tem controller, não tem construtor, sem construtor, sem DI, então como chamaria os repositórios? Passando nos métodos do próprio app: app.MapGet(), app.MapPost(), etc.:
+
+app.MapGet("api/v1/commands", async (ICommandRepo repo, IMapper mapper) => { //passa-se um arrayfunction com uma a rota do endpoint de fato, DEPOIS UM async com todas as dependências imaginando como controllermvc
+	var commands = await repo.GetAllCommands();
+	
+	return Results.Ok(mapper.Map<IEnumerable<CommandReadDto>>(commands));//RESULTS É NOVO DO .NET6.0, retorna um .Ok() passando o mapeamento da entidade base pra de leitura, usei Ok pq sempre vai retornar ALGO
+	//mapper.Map<MAPEIA-PRO-QUE-VC-QUER-MAPEAR>(O-OBJETO-QUE-VEM-A-SER-MAPEADO)
+});
+
+jogando a rota certinha no postman, vai trazer justamente um Dto, sem mexer com a Model, OU MEXENDO caso queira. Se quiser não mostrar o Id, só tirar do Dto de leitura.
+
+dá pra fazer também usando model binding, mas tem que ver se funciona. funcionando OK, senão tem que colocar [FromRoute] ou [FromBody] antes do atributo, só que tem que adicionar o MVC aí meio que fica zuado mas normalmente ele consegue se virar
+app.MapGet("api/v1/commands/{id}", async (ICommandRepo repo, IMapper mapper, int id) => {
+    var command = await repo.GetCommandById(id);
+    
+    if (command != null)//como pode não haver um match, usa-se Results.Ok e Results.NotFound
+    {
+        return Results.Ok(mapper.Map<CommandReadDto>(command));
+    }
+    return Results.NotFound();
+});
+
+no post é tranquilo, pede-se um Dto de criação nos delegados e pronto, se não pegar, talvez [FromBody] no Dto resolva
+app.MapPost("api/v1/commands", async (ICommandRepo repo, IMapper mapper, CommandCreateDto cmdCreateDto) => {
+    var commandModel = mapper.Map<Command>(cmdCreateDto);//primeiro mapeia pra model
+
+    await repo.CreateCommand(commandModel);//abre a transaction
+    await repo.SaveChanges();//FECHA a transaction OLHA A LINHA 85
+
+    var cmdReadDto = mapper.Map<CommandReadDto>(commandModel);//traduz pra um readDto
+
+    return Results.Created($"api/v1/commands/{cmdReadDto.Id}", cmdReadDto);//chama a API que pega por ID usando o Id do commandReadDto
+});
+
+no put pra atualizar, como não tenho o update é só fazer uma amalgação do GetCommandById usando automapper:
+app.MapPut("api/v1/commands/{id}", async (ICommandRepo repo, IMapper mapper, int id, CommandUpdateDto cmdUpdateDto) => {
+    var command = await repo.GetCommandById(id);
+    
+    if (command == null)
+    {
+        return Results.NotFound();
+    }
+    
+    mapper.Map(cmdUpdateDto, command);//só troca, pra dar update pega as coisas do cmdUpdateDto, mapeia pro command e dá um SaveChanges(), cabou
+    await repo.SaveChanges();
+
+    return Results.NoContent();
+});
+
+faltando o delete..https://www.youtube.com/watch?v=5YB49OEmbbE 2:03:33
+
+minimalAPI não tem:
+filter, algo que vem do MVC e é usado pra caso queira ser feito algo antes da request ou depois
+custom model binding
+model validation não vem nas minimalAPIs, devem ser incluídas com libs como FluentValidation e MinimalValidation. No MVC, já vem direto da annotation [ApiController]
